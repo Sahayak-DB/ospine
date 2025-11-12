@@ -3,7 +3,7 @@
 
 A basic, fast, asynchronous port scanner with:
 - Multi-threaded concurrency (Tokio multi-thread runtime)
-- Protocol identification (HTTP, HTTPS/TLS, SSH, SMTP heuristics)
+- Protocol identification (HTTP, HTTPS/TLS, SSH, SMTP, Telnet heuristics)
 - Header/packet inspection via lightweight probes
 - Banner grabbing (passive read first, then protocol-specific probes)
 
@@ -30,6 +30,7 @@ Options:
   -t, --timeout-ms <MS>      Per-port timeout in milliseconds [default: 1200]
   -b, --banner-bytes <N>     Max bytes to read for banners [default: 512]
   -o, --open-only            Output only open ports (filters out closed/timeouts)
+  -r, --raw-banner           Show raw banner text (don't escape newlines) in human-readable output
   -j, --json                 Output JSON instead of human-readable lines
   -h, --help                 Print help
   -V, --version              Print version
@@ -82,9 +83,9 @@ JSON (`-j`):
 
 - UDP scanning and protocol probes
 - Service fingerprinting (more protocols: MySQL, PostgreSQL, Redis, RDP, SMB, MQTT, etc.)
-- TLS SNI-based probing and certificate parsing
 - Rate limiting per host/network, CIDR/host list inputs
+- Scripting support for advanced scanning activity
 
 ## Legal
 
-Use responsibly. Only scan systems you own or are explicitly authorized to test. Unauthorized scanning may be illegal or violate terms of service.
+Use responsibly. Only scan systems you own or have explicit authorization in writing to test. Unauthorized scanning may be illegal or violate terms of service. Maintainers present this code without any warranty or recourse for its usage.

@@ -50,6 +50,10 @@ struct Cli {
     /// Output only open ports (filters out closed/timeouts)
     #[arg(short = 'o', long = "open-only", action = ArgAction::SetTrue)]
     open_only: bool,
+
+    /// Show raw banner text without escaping newlines or carriage returns (human-readable mode only)
+    #[arg(short = 'r', long = "raw-banner", action = ArgAction::SetTrue)]
+    raw_banner: bool,
 }
 
 fn parse_ports(spec: &str) -> Result<Vec<u16>> {
@@ -76,7 +80,7 @@ fn parse_targets(input: &str) -> Result<Vec<String>> {
     // Try CIDR first
     if let Ok(net) = IpNet::from_str(input) {
         // Put a safety cap to avoid accidental huge scans
-        const MAX_HOSTS: usize = 1_000_000;
+        const MAX_HOSTS: usize = 100_000;
         let hosts: Vec<String> = net.hosts().map(|ip| ip.to_string()).collect();
         if hosts.len() > MAX_HOSTS {
             anyhow::bail!("CIDR expands to {} hosts which exceeds the safety cap of {}", hosts.len(), MAX_HOSTS);
@@ -141,8 +145,9 @@ async fn main() -> Result<()> {
                 line.push_str(&format!(" [{}]", proto));
             }
             if let Some(banner) = r.banner {
-                let preview = banner.replace('\n', "\\n").replace('\r', "\\r");
-                line.push_str(&format!(" — {}", preview));
+                if cli.raw_banner {
+                    line.push_str(&format!(" — {}", banner));
+                }
             }
             println!("{}", line);
         }

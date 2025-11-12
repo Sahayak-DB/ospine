@@ -23,6 +23,8 @@ pub enum Protocol {
     Ssh,
     Smtp,
     Tls,
+    Telnet,
+    Dns,
     Unknown,
 }
 
@@ -34,6 +36,8 @@ impl Display for Protocol {
             Protocol::Ssh => "ssh",
             Protocol::Smtp => "smtp",
             Protocol::Tls => "tls",
+            Protocol::Telnet => "telnet",
+            Protocol::Dns => "dns",
             Protocol::Unknown => "unknown",
         };
         write!(f, "{}", s)
