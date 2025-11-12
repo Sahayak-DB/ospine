@@ -1,9 +1,8 @@
 use anyhow::Result;
 use clap::{ArgAction, Parser};
-use serde::Serialize;
-use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
+use ipnet::IpNet;
 
 mod scanner;
 mod protocols;
@@ -11,6 +10,7 @@ mod types;
 
 use scanner::scan_ports;
 use types::{PortSpec, ScanConfig, ScanOutput};
+use futures::stream::{FuturesUnordered, StreamExt};
 
 // Popular TCP ports list used by --popular flag
 const POPULAR_PORTS: &[u16] = &[
@@ -20,7 +20,7 @@ const POPULAR_PORTS: &[u16] = &[
 #[derive(Parser, Debug)]
 #[command(name = "ospine", version, about = "Open Source Port Interrogation & Network Enumeration")] 
 struct Cli {
-    /// Target host (IP or hostname)
+    /// Target (IP, hostname, or CIDR range)
     target: String,
 
     /// Ports to scan (e.g. 80,443,8000-8100). Comma-separated list and/or ranges
@@ -72,12 +72,25 @@ fn parse_ports(spec: &str) -> Result<Vec<u16>> {
     Ok(ports)
 }
 
+fn parse_targets(input: &str) -> Result<Vec<String>> {
+    // Try CIDR first
+    if let Ok(net) = IpNet::from_str(input) {
+        // Put a safety cap to avoid accidental huge scans
+        const MAX_HOSTS: usize = 1_000_000;
+        let hosts: Vec<String> = net.hosts().map(|ip| ip.to_string()).collect();
+        if hosts.len() > MAX_HOSTS {
+            anyhow::bail!("CIDR expands to {} hosts which exceeds the safety cap of {}", hosts.len(), MAX_HOSTS);
+        }
+        return Ok(hosts);
+    }
+    // Otherwise, treat as single IP or hostname string
+    Ok(vec![input.to_string()])
+}
+
 #[tokio::main(flavor = "multi_thread")] 
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Try to resolve early so we can display a stable target
-    let target_display = cli.target.clone();
     let ports = if cli.popular {
         let mut v = POPULAR_PORTS.to_vec();
         v.sort_unstable();
@@ -87,25 +100,41 @@ async fn main() -> Result<()> {
         parse_ports(&cli.ports)?
     };
 
-    let cfg = ScanConfig {
-        target: target_display,
-        port_spec: PortSpec::List(ports),
-        concurrency: cli.concurrency,
-        timeout: Duration::from_millis(cli.timeout_ms),
-        banner_read_len: cli.banner_bytes,
-    };
+    let targets = parse_targets(&cli.target)?;
 
-    let mut results = scan_ports(cfg).await?;
+    // Run scans per target concurrently and aggregate
+    let mut tasks = FuturesUnordered::new();
+    for t in targets {
+        let cfg = ScanConfig {
+            target: t,
+            port_spec: PortSpec::List(ports.clone()),
+            concurrency: cli.concurrency,
+            timeout: Duration::from_millis(cli.timeout_ms),
+            banner_read_len: cli.banner_bytes,
+        };
+        tasks.push(tokio::spawn(scan_ports(cfg)));
+    }
+
+    let mut all_results = Vec::new();
+    while let Some(res) = tasks.next().await {
+        match res {
+            Ok(Ok(mut list)) => all_results.append(&mut list),
+            Ok(Err(e)) => eprintln!("scan task error: {}", e),
+            Err(join_err) => eprintln!("scan task join error: {}", join_err),
+        }
+    }
 
     if cli.open_only {
-        results.retain(|r| r.open);
+        all_results.retain(|r| r.open);
     }
 
     if cli.json {
-        let out = ScanOutput { results };
+        let out = ScanOutput { results: all_results };
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
-        for r in results {
+        // Sort output by target then port for stability
+        all_results.sort_by(|a, b| a.target.cmp(&b.target).then(a.port.cmp(&b.port)));
+        for r in all_results {
             let status = if r.open { "open" } else { "closed" };
             let mut line = format!("{}:{} {}", r.target, r.port, status);
             if let Some(proto) = r.protocol {

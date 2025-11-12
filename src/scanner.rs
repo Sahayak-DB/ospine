@@ -1,10 +1,7 @@
 use crate::protocols::identify_and_banner;
-use crate::types::{PortSpec, Protocol, ScanConfig, ScanResult};
+use crate::types::{PortSpec, ScanConfig, ScanResult};
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
-use std::net::ToSocketAddrs;
-use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use std::sync::Arc;
@@ -57,9 +54,9 @@ pub async fn scan_ports(cfg: ScanConfig) -> Result<Vec<ScanResult>> {
 
 async fn scan_one(cfg: &ScanConfig, port: u16) -> Result<ScanResult> {
     let target = cfg.target.clone();
-    let addr = format!("{}:{}", target, port);
 
-    let connect_res = time::timeout(cfg.timeout, TcpStream::connect(&addr)).await;
+    // Use (host, port) tuple to let ToSocketAddrs handle IPv6 brackets and DNS resolution
+    let connect_res = time::timeout(cfg.timeout, TcpStream::connect((target.as_str(), port))).await;
     match connect_res {
         Err(_) => Ok(ScanResult {
             target,

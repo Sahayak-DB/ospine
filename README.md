@@ -21,7 +21,7 @@ cargo build --release
 ospine <target> [OPTIONS]
 
 Arguments:
-  <target>  Target host (IP or hostname)
+  <target>  Target (IP, hostname, or CIDR range)
 
 Options:
   -p, --ports <PORTS>        Ports to scan (e.g. 80,443,8000-8100) [default: 1-1024]
@@ -46,6 +46,9 @@ ospine 93.184.216.34 -p 80,443,8080,8443 -j
 
 # Scan a range with tighter timeout and higher concurrency
 ospine localhost -p 1-65535 -t 500 -c 1024
+
+# Scan an entire CIDR (expands to all host IPs; safety cap applies)
+ospine 192.168.1.0/28 -p 22,80,443
 ```
 
 ## Output
@@ -81,8 +84,6 @@ JSON (`-j`):
 - Service fingerprinting (more protocols: MySQL, PostgreSQL, Redis, RDP, SMB, MQTT, etc.)
 - TLS SNI-based probing and certificate parsing
 - Rate limiting per host/network, CIDR/host list inputs
-- Output formats (NDJSON, CSV) and machine-readable error codes
-- Tests and benchmarks
 
 ## Legal
 
