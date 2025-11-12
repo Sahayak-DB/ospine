@@ -6,6 +6,7 @@ authors = ["Ospine Contributors"]
 license = "MIT OR Apache-2.0"
 repository = "https://example.com/ospine"
 description = "Open Source Port Interrogation & Network Enumeration (basic port scanner)"
+build = "build.rs"
 
 [dependencies]
 anyhow = "1.0"

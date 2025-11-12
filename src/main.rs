@@ -12,13 +12,16 @@ use scanner::scan_ports;
 use types::{PortSpec, ScanConfig, ScanOutput};
 use futures::stream::{FuturesUnordered, StreamExt};
 
+// Build-time version: Major.Minor.Patch.Build
+const APP_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), ".", env!("APP_BUILD"));
+
 // Popular TCP ports list used by --popular flag
 const POPULAR_PORTS: &[u16] = &[
     20,21,22,23,25,53,67,68,69,80,110,111,123,135,137,138,139,143,161,162,443,445,500,514,520,631,993,995,1434,1723,1900,3306,3389,4500,5900,8080,49152,
 ];
 
 #[derive(Parser, Debug)]
-#[command(name = "ospine", version, about = "Open Source Port Interrogation & Network Enumeration")] 
+#[command(name = "ospine", version = APP_VERSION, about = "Open Source Port Interrogation & Network Enumeration")] 
 struct Cli {
     /// Target (IP, hostname, or CIDR range)
     target: String,

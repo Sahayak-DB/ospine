@@ -89,3 +89,42 @@ JSON (`-j`):
 ## Legal
 
 Use responsibly. Only scan systems you own or have explicit authorization in writing to test. Unauthorized scanning may be illegal or violate terms of service. Maintainers present this code without any warranty or recourse for its usage.
+
+
+## Versioning (Major.Minor.Patch.Build)
+
+The binary embeds a build number as the 4th segment of the semantic version: `Major.Minor.Patch.Build`.
+
+How `Build` is determined at compile time:
+- If one of these environment variables is set, it is used (in order of precedence):
+  - `APP_BUILD` (explicit override)
+  - `GITHUB_RUN_NUMBER` (GitHub Actions)
+  - `CI_PIPELINE_IID` or `CI_JOB_ID` (GitLab CI)
+  - `CIRCLE_BUILD_NUM` (CircleCI)
+  - `BITBUCKET_BUILD_NUMBER` (Bitbucket Pipelines)
+  - `BUILD_BUILDID` (Azure Pipelines)
+  - `TEAMCITY_BUILD_ID` (TeamCity)
+  - `DRONE_BUILD_NUMBER` (Drone CI)
+  - `JENKINS_BUILD_NUMBER` or generic `BUILD_NUMBER` (Jenkins/legacy)
+- Otherwise, the build script falls back to the local Git commit count: `git rev-list --count HEAD`.
+- If neither is available, it uses `0`.
+
+This is implemented by `build.rs`, which exports `APP_BUILD` as a compile-time environment variable consumed by the CLI metadata. You can see the final version with:
+
+```
+./target/debug/ospine --version
+```
+
+Local development examples:
+- Ensure Git is available so the commit count can be used, or set `APP_BUILD` manually:
+  - `APP_BUILD=123 cargo build`
+
+CI example (GitHub Actions):
+
+```
+- name: Build
+  run: cargo build --release
+  # The build number will automatically come from $GITHUB_RUN_NUMBER
+```
+
+Note: The build script instructs Cargo to rerun when relevant env vars change or when Git `HEAD` moves, keeping the embedded version up to date across builds.
