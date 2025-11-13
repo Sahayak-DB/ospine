@@ -1,11 +1,12 @@
 # ospine
 # Open Source Port Interrogation & Network Enumeration
 
-A basic, fast, asynchronous port scanner with:
+A fast, asynchronous port scanner with probe detection support:
 - Multi-threaded concurrency (Tokio multi-thread runtime)
 - Protocol identification (HTTP, HTTPS/TLS, SSH, SMTP, Telnet heuristics)
 - Header/packet inspection via lightweight probes
 - Banner grabbing (passive read first, then protocol-specific probes)
+- Configuration options for concurrency, safety and speed of scanning
 
 ## Build
 
@@ -24,16 +25,19 @@ Arguments:
   <target>  Target (IP, hostname, or CIDR range)
 
 Options:
-  -p, --ports <PORTS>        Ports to scan (e.g. 80,443,8000-8100) [default: 1-1024]
-  -P, --popular              Scan only popular ports (overrides --ports when set)
-  -c, --concurrency <N>      Max concurrent connections [default: 512]
-  -t, --timeout-ms <MS>      Per-port timeout in milliseconds [default: 1200]
-  -b, --banner-bytes <N>     Max bytes to read for banners [default: 512]
-  -o, --open-only            Output only open ports (filters out closed/timeouts)
-  -r, --raw-banner           Show raw banner text (don't escape newlines) in human-readable output
-  -j, --json                 Output JSON instead of human-readable lines
-  -h, --help                 Print help
-  -V, --version              Print version
+  -p, --ports <PORTS>            Ports to scan (e.g. 80,443,8000-8100) [default: 1-1024]
+  -P, --popular                  Scan only popular ports (overrides --ports when set)
+  -c, --concurrency <N>          Max concurrent connections per target [default: 100]
+  -t, --timeout-ms <MS>          Per-port timeout in milliseconds [default: 1000]
+  -b, --banner-bytes <N>         Max bytes to read for banners [default: 512]
+      --passive                  Passive mode: do not send any probes, only read banners
+      --max-connections <N>      Global cap on in-flight TCP connections [default: 10000]
+      --rate <N>                 Global rate limit for connection attempts per second [default: 5000]
+  -o, --open-only                Output only open ports (filters out closed/timeouts)
+  -r, --raw-banner               Show banner text in human-readable output (escaped)
+  -j, --json                     Output JSON instead of human-readable lines
+  -h, --help                     Print help
+  -V, --version                  Print version
 ```
 
 Examples:
@@ -50,6 +54,9 @@ ospine localhost -p 1-65535 -t 500 -c 1024
 
 # Scan an entire CIDR (expands to all host IPs; safety cap applies)
 ospine 192.168.1.0/28 -p 22,80,443
+
+# Passive scan (no probes sent) with global safety limits
+ospine example.org -p 1-1024 --passive --max-connections 2000 --rate 1000
 ```
 
 ## Output
@@ -83,7 +90,6 @@ JSON (`-j`):
 
 - UDP scanning and protocol probes
 - Service fingerprinting (more protocols: MySQL, PostgreSQL, Redis, RDP, SMB, MQTT, etc.)
-- Rate limiting per host/network, CIDR/host list inputs
 - Scripting support for advanced scanning activity
 
 ## Legal
@@ -128,3 +134,9 @@ CI example (GitHub Actions):
 ```
 
 Note: The build script instructs Cargo to rerun when relevant env vars change or when Git `HEAD` moves, keeping the embedded version up to date across builds.
+
+Audit:
+```
+cargo install cargo-audit
+cargo audit --deny warnings
+```

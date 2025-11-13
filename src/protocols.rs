@@ -10,6 +10,7 @@ pub async fn identify_and_banner(
     port: u16,
     max_bytes: usize,
     op_timeout: Duration,
+    passive: bool,
 ) -> (Option<Protocol>, Option<String>) {
     // First, try to read any immediate banner without sending data (e.g., SSH, SMTP, Telnet IAC)
     match read_some(stream, max_bytes, op_timeout).await {
@@ -21,7 +22,13 @@ pub async fn identify_and_banner(
         _ => {}
     }
 
-    // If nothing came in, try protocol-specific probes
+    // If nothing came in, optionally try protocol-specific probes unless passive mode is enabled
+    if passive {
+        // In passive mode, we do not send any bytes. Report unknown/open with no banner.
+        return (Some(Protocol::Unknown), None);
+    }
+
+    // Active probing path (not in passive mode)
     // 0) DNS-over-TCP probe if port suggests DNS
     if port == 53 {
         if let Ok((proto, banner)) = dns_probe(stream, max_bytes, op_timeout).await {
@@ -70,7 +77,7 @@ fn detect_from_bytes(buf: &[u8], port_hint: u16) -> (Protocol, Option<String>) {
         return (Protocol::Telnet, Some(to_safe_string(buf)));
     }
     // TLS servers typically wait for ClientHello; but if we received TLS alert or handshake, detect
-    if buf.get(0) == Some(&0x16) && matches!(buf.get(1), Some(0x03)) {
+    if buf.get(0) == Some(&0x16) && matches!(buf.get(1), Some(b) if *b == 0x03) {
         return (Protocol::Tls, Some(hex_preview(buf)));
     }
     // DNS over TCP likely starts with 2-byte length prefix, then 12-byte header where QR bit may be 1 in responses.
@@ -110,7 +117,7 @@ async fn http_probe(
     max_bytes: usize,
     op_timeout: Duration,
 ) -> Result<(Protocol, Option<String>), ()> {
-    let probe = b"HEAD / HTTP/1.0\r\nHost: localhost\r\nUser-Agent: ospine\r\nConnection: close\r\n\r\n";
+    let probe = b"HEAD / HTTP/1.1\r\nHost: remotehost\r\nUser-Agent: ospine\r\nConnection: close\r\n\r\n";
     if timeout(op_timeout, stream.write_all(probe)).await.is_err() {
         return Err(());
     }

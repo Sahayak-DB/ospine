@@ -9,11 +9,15 @@ mod protocols;
 mod types;
 
 use scanner::scan_ports;
-use types::{PortSpec, ScanConfig, ScanResult, ScanOutput};
+use types::{PortSpec, ScanConfig, RateLimiter};
 use futures::stream::{self, StreamExt};
-use std::io::{self, Write};
-use std::fs::File;
-use std::io::BufWriter;
+use std::io::{self, Write, BufRead};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, BufReader, Seek, SeekFrom};
+use std::path::PathBuf;
+use std::env::temp_dir;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 // Build-time version: Major.Minor.Patch.Build
 const APP_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), ".", env!("APP_BUILD"));
@@ -38,11 +42,11 @@ struct Cli {
     popular: bool,
 
     /// Max concurrent connections
-    #[arg(short = 'c', long, default_value_t = 512)]
+    #[arg(short = 'c', long, default_value_t = 100)]
     concurrency: usize,
 
     /// Per-port timeout milliseconds
-    #[arg(short = 't', long, default_value_t = 1200)]
+    #[arg(short = 't', long, default_value_t = 1000)]
     timeout_ms: u64,
 
     /// Bytes to read for banner/probe
@@ -54,6 +58,10 @@ struct Cli {
     )]
     banner_bytes: u32,
 
+    /// Passive mode: do not send any probe data; only perform passive banner reads
+    #[arg(long = "passive", action = ArgAction::SetTrue)]
+    passive: bool,
+
     /// JSON output
     #[arg(short = 'j', long, action = ArgAction::SetTrue)]
     json: bool,
@@ -62,13 +70,21 @@ struct Cli {
     #[arg(short = 'o', long = "open-only", action = ArgAction::SetTrue)]
     open_only: bool,
 
-    /// Show raw banner text without escaping newlines or carriage returns (human-readable mode only)
+    /// Show raw banner text (human-readable mode only)
     #[arg(short = 'r', long = "raw-banner", action = ArgAction::SetTrue)]
     raw_banner: bool,
 
-    /// Save completed ScanOutput JSON artifact to this file when the scan finishes
+    /// Save completed JSON artifact to this file when the scan finishes
     #[arg(short = 's', long = "save-file", default_value = "last_scan.output")]
     save_file: String,
+
+    /// Global cap on in-flight TCP connections across all targets
+    #[arg(long = "max-connections", default_value_t = 10_000_usize)]
+    max_connections: usize,
+
+    /// Global rate limit for connection attempts per second
+    #[arg(long = "rate", default_value_t = 5_000_u64)]
+    rate: u64,
 }
 
 fn parse_ports(spec: &str) -> Result<Vec<u16>> {
@@ -159,6 +175,11 @@ async fn main() -> Result<()> {
 
     // Prepare a stream of scan futures and buffer them with the global limit
     let ports_arc = ports.clone();
+    // Create a global semaphore to enforce the connection cap
+    let global_limit = Arc::new(Semaphore::new(cli.max_connections));
+    // Create a global rate limiter shared across all targets
+    let rate_limiter = Arc::new(RateLimiter::new(cli.rate));
+
     let target_stream = stream::iter(targets.into_iter().map(move |t| {
         let cfg = ScanConfig {
             target: t,
@@ -166,15 +187,40 @@ async fn main() -> Result<()> {
             concurrency: cli.concurrency,
             timeout: Duration::from_millis(cli.timeout_ms),
             banner_read_len: cli.banner_bytes as usize,
+            passive: cli.passive,
+            global_limit: global_limit.clone(),
+            rate_limiter: rate_limiter.clone(),
         };
         async move { scan_ports(cfg).await }
     }));
 
     let mut in_flight = target_stream.buffer_unordered(target_concurrency);
 
-    // Prepare accumulation for final artifact and temp streaming persistence
-    let mut all_results: Vec<ScanResult> = Vec::new();
-    let tmp_file = File::create("output.tmp")?;
+    // Prepare temp streaming persistence for final artifact construction without in-memory aggregation
+    // Create a randomized temp file in the OS temp directory with O_EXCL semantics to avoid clobber/symlink issues.
+    let mut tmp_path: Option<PathBuf> = None;
+    let mut tmp_file: Option<File> = None;
+    // Attempt a few times to avoid extremely unlikely name collisions
+    for attempt in 0..3u8 {
+        let mut path = temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let pid = std::process::id();
+        let name = format!("ospine.{pid}.{nanos}.{attempt}.ndjson.tmp");
+        path.push(name);
+        match OpenOptions::new().read(true).write(true).create_new(true).open(&path) {
+            Ok(f) => {
+                tmp_path = Some(path);
+                tmp_file = Some(f);
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+    let tmp_path = tmp_path.ok_or_else(|| anyhow::anyhow!("failed to create secure temp file after several attempts"))?;
+    let tmp_file = tmp_file.expect("temp file handle must exist if path is set");
     let mut tmp_writer = BufWriter::new(tmp_file);
 
     // Streaming output: do not accumulate all results in memory
@@ -197,7 +243,6 @@ async fn main() -> Result<()> {
                         // Persist to temp file as NDJSON (one ScanResult per line)
                         let line = serde_json::to_string(&r)?;
                         writeln!(tmp_writer, "{}", line)?;
-                        all_results.push(r.clone());
                         let line = serde_json::to_string(&r)?;
                         if !first_json_item { print!(","); }
                         print!("{}", line);
@@ -212,7 +257,6 @@ async fn main() -> Result<()> {
                         // Persist to temp and accumulation as well in human-readable mode
                         let json_line = serde_json::to_string(&r)?;
                         writeln!(tmp_writer, "{}", json_line)?;
-                        all_results.push(r.clone());
                         let status = if r.open { "open" } else { "closed" };
                         let mut line = format!("{}:{} {}", r.target, r.port, status);
                         if let Some(proto) = r.protocol {
@@ -236,19 +280,40 @@ async fn main() -> Result<()> {
         println!("]}}");
     }
 
-    // Ensure temp file is flushed
+    // Ensure temp file is flushed before reading it back; keep the handle and seek instead of reopening by path
     tmp_writer.flush().ok();
-
-    // Write the final consolidated ScanOutput artifact
-    let artifact = ScanOutput { results: all_results };
+    // Recover the underlying File handle from BufWriter
+    let mut tmp_file = match tmp_writer.into_inner() {
+        Ok(f) => f,
+        Err(e) => {
+            // If into_inner fails (e.g., due to prior write error), propagate the underlying error
+            return Err(e.into_error().into());
+        }
+    };
+    // Rewind to the beginning for reading
+    tmp_file.seek(SeekFrom::Start(0))?;
+    let reader = BufReader::new(tmp_file);
     let mut out = BufWriter::new(File::create(&cli.save_file)?);
-    serde_json::to_writer(&mut out, &artifact)?;
+    write!(&mut out, "{{\"results\":[")?;
+    let mut first = true;
+    for line_res in reader.lines() {
+        let line = line_res?;
+        if line.is_empty() { continue; }
+        if !first { write!(&mut out, ",")?; }
+        first = false;
+        // Each line is already a serialized ScanResult JSON object
+        write!(&mut out, "{}", line)?;
+    }
+    write!(&mut out, "]}}")?;
     out.flush().ok();
 
-    // Close and remove the temporary file
-    drop(tmp_writer); // Ensure the file handle is closed before attempting removal (important on Windows)
-    if let Err(e) = std::fs::remove_file("output.tmp") {
-        eprintln!("warning: failed to remove temp file output.tmp: {}", e);
+    // Remove the temporary file
+    if let Err(e) = std::fs::remove_file(&tmp_path) {
+        eprintln!(
+            "warning: failed to remove temp file {}: {}",
+            tmp_path.display(),
+            e
+        );
     }
 
     Ok(())
