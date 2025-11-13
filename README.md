@@ -89,7 +89,7 @@ JSON (`-j`):
 ## Roadmap
 
 - UDP scanning and protocol probes
-- Service fingerprinting (more protocols: MySQL, PostgreSQL, Redis, RDP, SMB, MQTT, etc.)
+- Service fingerprinting (more protocols: PostgreSQL, Redis, RDP, SMB, MQTT, etc.)
 - Scripting support for advanced scanning activity
 
 ## Legal

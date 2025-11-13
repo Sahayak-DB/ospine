@@ -33,6 +33,7 @@ pub enum Protocol {
     Tls,
     Telnet,
     Dns,
+    Mysql,
     Unknown,
 }
 
@@ -46,6 +47,7 @@ impl Display for Protocol {
             Protocol::Tls => "tls",
             Protocol::Telnet => "telnet",
             Protocol::Dns => "dns",
+            Protocol::Mysql => "mysql",
             Protocol::Unknown => "unknown",
         };
         write!(f, "{}", s)

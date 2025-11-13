@@ -36,6 +36,13 @@ pub async fn identify_and_banner(
         }
     }
 
+    // 0.5) MySQL greeting read if port suggests MySQL
+    if port == 3306 {
+        if let Ok((proto, banner)) = mysql_probe(stream, max_bytes, op_timeout).await {
+            return (Some(proto), banner);
+        }
+    }
+
     // 1) HTTP probe
     if let Ok((proto, banner)) = http_probe(stream, max_bytes, op_timeout).await {
         return (Some(proto), banner);
@@ -89,6 +96,11 @@ fn detect_from_bytes(buf: &[u8], port_hint: u16) -> (Protocol, Option<String>) {
             return (Protocol::Dns, Some(hex_preview(buf)));
         }
     }
+    // MySQL greeting detection: 4-byte header (len,seq), then 0x0a protocol version, then NUL-terminated server version
+    if let Some((ver, server)) = try_parse_mysql_greeting(buf) {
+        let banner = format!("mysql protocol=10 version={}", server.unwrap_or_else(|| format!("0x{:02x}", ver)));
+        return (Protocol::Mysql, Some(banner));
+    }
     // Heuristics by port
     match port_hint {
         80 | 8080 | 8000 | 8888 => (Protocol::Http, None),
@@ -97,6 +109,7 @@ fn detect_from_bytes(buf: &[u8], port_hint: u16) -> (Protocol, Option<String>) {
         23 => (Protocol::Telnet, None),
         25 | 587 | 465 => (Protocol::Smtp, None),
         53 => (Protocol::Dns, None),
+        3306 => (Protocol::Mysql, None),
         _ => (Protocol::Unknown, None),
     }
 }
@@ -280,6 +293,45 @@ async fn tls_probe(
         }
         _ => Err(()),
     }
+}
+
+// --- MySQL detection helpers and probe ---
+
+// Returns (protocol_version_byte, Some(server_version_string)) if greeting is detected
+fn try_parse_mysql_greeting(buf: &[u8]) -> Option<(u8, Option<String>)> {
+    if buf.len() < 5 { return None; }
+    // MySQL packets start with 3-byte little-endian length and 1 byte sequence id.
+    // The first payload byte is protocol version (0x0a for modern MySQL/MariaDB).
+    let payload_len = (buf[0] as usize) | ((buf[1] as usize) << 8) | ((buf[2] as usize) << 16);
+    let _seq = buf[3];
+    if buf.len() < 4 + payload_len { /* partial read is still acceptable, continue parsing best-effort */ }
+    let proto = buf[4];
+    if proto != 0x0a { return None; }
+    // Server version is a NUL-terminated ASCII string starting at offset 5
+    let mut i = 5usize;
+    while i < buf.len() && buf[i] != 0 { i += 1; }
+    let server = if i > 5 && i <= buf.len() {
+        let s = String::from_utf8_lossy(&buf[5..i]).to_string();
+        Some(s)
+    } else { None };
+    Some((proto, server))
+}
+
+async fn mysql_probe(
+    stream: &mut TcpStream,
+    max_bytes: usize,
+    op_timeout: Duration,
+) -> Result<(Protocol, Option<String>), ()> {
+    // MySQL servers send greeting immediately on connect. Try another read to catch it.
+    let buf = match read_some(stream, max_bytes, op_timeout).await {
+        Ok(b) if !b.is_empty() => b,
+        _ => return Err(()),
+    };
+    if let Some((_ver, server)) = try_parse_mysql_greeting(&buf) {
+        let banner = server.map(|s| format!("{}", s)).or_else(|| Some(to_safe_string(&buf)));
+        return Ok((Protocol::Mysql, banner));
+    }
+    Err(())
 }
 
 fn to_safe_string(buf: &[u8]) -> String {
