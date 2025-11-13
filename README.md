@@ -19,23 +19,26 @@ cargo build --release
 ## Usage
 
 ```
-ospine <target> [OPTIONS]
+ospine [target] [OPTIONS]
 
 Arguments:
-  <target>  Target (IP, hostname, or CIDR range)
+  [target]  Target (IP, hostname, or CIDR range). If omitted, must be provided by a config file.
 
 Options:
-  -p, --ports <PORTS>            Ports to scan (e.g. 80,443,8000-8100) [default: 1-1024]
+  -p, --ports <PORTS>            Ports to scan (e.g. 80,443,8000-8100)
   -P, --popular                  Scan only popular ports (overrides --ports when set)
-  -c, --concurrency <N>          Max concurrent connections per target [default: 100]
-  -t, --timeout-ms <MS>          Per-port timeout in milliseconds [default: 1000]
-  -b, --banner-bytes <N>         Max bytes to read for banners [default: 512]
+  -c, --concurrency <N>          Max concurrent connections per target
+  -t, --timeout-ms <MS>          Per-port timeout in milliseconds
+  -b, --banner-bytes <N>         Max bytes to read for banners
       --passive                  Passive mode: do not send any probes, only read banners
-      --max-connections <N>      Global cap on in-flight TCP connections [default: 10000]
-      --rate <N>                 Global rate limit for connection attempts per second [default: 5000]
+      --max-connections <N>      Global cap on in-flight TCP connections
+      --rate <N>                 Global rate limit for connection attempts per second
   -o, --open-only                Output only open ports (filters out closed/timeouts)
   -r, --raw-banner               Show banner text in human-readable output (escaped)
   -j, --json                     Output JSON instead of human-readable lines
+  -s, --save-file <PATH>         Save final JSON artifact to this file
+      --config <PATH>            Path to a TOML config file (default: $XDG_CONFIG_HOME/ospine/config.toml if present)
+      --write-config             Write current effective configuration to the config file and exit
   -h, --help                     Print help
   -V, --version                  Print version
 ```
@@ -57,6 +60,36 @@ ospine 192.168.1.0/28 -p 22,80,443
 
 # Passive scan (no probes sent) with global safety limits
 ospine example.org -p 1-1024 --passive --max-connections 2000 --rate 1000
+```
+
+## Configuration file
+
+You can persist your favorite settings in a TOML configuration file. The default location is:
+- Linux/macOS: `$XDG_CONFIG_HOME/ospine/config.toml` (typically `~/.config/ospine/config.toml`)
+- Windows: `%APPDATA%/ospine/config/config.toml`
+
+Precedence: CLI flags override the config file, which in turn overrides built-in defaults. Boolean flags from CLI can only enable features (no `--no-...` toggles yet).
+
+Generate a config from your current CLI choices:
+
+```
+ospine example.org -p 22,80,443 -c 512 -t 750 --rate 2000 --write-config
+# writes to default config path unless --config PATH is provided
+```
+
+Minimal example `config.toml`:
+
+```
+target = "example.org"
+ports = "22,80,443,8080"
+concurrency = 512
+timeout_ms = 750
+banner_bytes = 1024
+json = true
+open_only = true
+save_file = "last_scan.json"
+max_connections = 2000
+rate = 2000
 ```
 
 ## Output
