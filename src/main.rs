@@ -9,8 +9,11 @@ mod protocols;
 mod types;
 
 use scanner::scan_ports;
-use types::{PortSpec, ScanConfig, ScanOutput};
-use futures::stream::{FuturesUnordered, StreamExt};
+use types::{PortSpec, ScanConfig, ScanResult, ScanOutput};
+use futures::stream::{self, StreamExt};
+use std::io::{self, Write};
+use std::fs::File;
+use std::io::BufWriter;
 
 // Build-time version: Major.Minor.Patch.Build
 const APP_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), ".", env!("APP_BUILD"));
@@ -43,8 +46,13 @@ struct Cli {
     timeout_ms: u64,
 
     /// Bytes to read for banner/probe
-    #[arg(short = 'b', long, default_value_t = 512)]
-    banner_bytes: usize,
+    #[arg(
+        short = 'b',
+        long,
+        default_value_t = 512_u32,
+        value_parser = clap::value_parser!(u32).range(1..=16384),
+    )]
+    banner_bytes: u32,
 
     /// JSON output
     #[arg(short = 'j', long, action = ArgAction::SetTrue)]
@@ -57,6 +65,10 @@ struct Cli {
     /// Show raw banner text without escaping newlines or carriage returns (human-readable mode only)
     #[arg(short = 'r', long = "raw-banner", action = ArgAction::SetTrue)]
     raw_banner: bool,
+
+    /// Save completed ScanOutput JSON artifact to this file when the scan finishes
+    #[arg(short = 's', long = "save-file", default_value = "last_scan.output")]
+    save_file: String,
 }
 
 fn parse_ports(spec: &str) -> Result<Vec<u16>> {
@@ -94,6 +106,38 @@ fn parse_targets(input: &str) -> Result<Vec<String>> {
     Ok(vec![input.to_string()])
 }
 
+// Escape control characters so untrusted banners can't manipulate the terminal.
+// - Converts '\\n', '\\r', and '\\t' into visible sequences ("\\n", "\\r", "\\t").
+// - Converts other control bytes (including ESC) to hex escapes like "\\x1b".
+// - Leaves printable Unicode characters as-is.
+fn escape_nonprintable(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\n' => { out.push('\\'); out.push('n'); }
+            '\r' => { out.push('\\'); out.push('r'); }
+            '\t' => { out.push('\\'); out.push('t'); }
+            c if c.is_control() => {
+                // Render as \xNN for BMP control chars
+                let v = c as u32;
+                if v <= 0xFF {
+                    use std::fmt::Write as _;
+                    out.push('\\'); out.push('x');
+                    let _ = write!(&mut out, "{v:02x}");
+                } else {
+                    // Fallback for any odd control-like codepoints
+                    use std::fmt::Write as _;
+                    out.push('\\'); out.push('u'); out.push('{');
+                    let _ = write!(&mut out, "{v:x}");
+                    out.push('}');
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 #[tokio::main(flavor = "multi_thread")] 
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -109,51 +153,102 @@ async fn main() -> Result<()> {
 
     let targets = parse_targets(&cli.target)?;
 
-    // Run scans per target concurrently and aggregate
-    let mut tasks = FuturesUnordered::new();
-    for t in targets {
+    // Global target concurrency limit to mitigate resource exhaustion
+    const MAX_TARGET_CONCURRENCY: usize = 1_000;
+    let target_concurrency = MAX_TARGET_CONCURRENCY.min(targets.len().max(1));
+
+    // Prepare a stream of scan futures and buffer them with the global limit
+    let ports_arc = ports.clone();
+    let target_stream = stream::iter(targets.into_iter().map(move |t| {
         let cfg = ScanConfig {
             target: t,
-            port_spec: PortSpec::List(ports.clone()),
+            port_spec: PortSpec::List(ports_arc.clone()),
             concurrency: cli.concurrency,
             timeout: Duration::from_millis(cli.timeout_ms),
-            banner_read_len: cli.banner_bytes,
+            banner_read_len: cli.banner_bytes as usize,
         };
-        tasks.push(tokio::spawn(scan_ports(cfg)));
+        async move { scan_ports(cfg).await }
+    }));
+
+    let mut in_flight = target_stream.buffer_unordered(target_concurrency);
+
+    // Prepare accumulation for final artifact and temp streaming persistence
+    let mut all_results: Vec<ScanResult> = Vec::new();
+    let tmp_file = File::create("output.tmp")?;
+    let mut tmp_writer = BufWriter::new(tmp_file);
+
+    // Streaming output: do not accumulate all results in memory
+    let mut first_json_item = true;
+    if cli.json {
+        // Start streaming a JSON object with a results array
+        print!("{{\"results\":[");
+        io::stdout().flush().ok();
     }
 
-    let mut all_results = Vec::new();
-    while let Some(res) = tasks.next().await {
+    while let Some(res) = in_flight.next().await {
         match res {
-            Ok(Ok(mut list)) => all_results.append(&mut list),
-            Ok(Err(e)) => eprintln!("scan task error: {}", e),
-            Err(join_err) => eprintln!("scan task join error: {}", join_err),
-        }
-    }
+            Ok(mut list) => {
+                if cli.open_only {
+                    list.retain(|r| r.open);
+                }
 
-    if cli.open_only {
-        all_results.retain(|r| r.open);
+                if cli.json {
+                    for r in list {
+                        // Persist to temp file as NDJSON (one ScanResult per line)
+                        let line = serde_json::to_string(&r)?;
+                        writeln!(tmp_writer, "{}", line)?;
+                        all_results.push(r.clone());
+                        let line = serde_json::to_string(&r)?;
+                        if !first_json_item { print!(","); }
+                        print!("{}", line);
+                        first_json_item = false;
+                    }
+                    // Flush periodically for streaming behavior
+                    io::stdout().flush().ok();
+                } else {
+                    // For human-readable output, sort per-target ports for stability
+                    list.sort_by(|a, b| a.target.cmp(&b.target).then(a.port.cmp(&b.port)));
+                    for r in list {
+                        // Persist to temp and accumulation as well in human-readable mode
+                        let json_line = serde_json::to_string(&r)?;
+                        writeln!(tmp_writer, "{}", json_line)?;
+                        all_results.push(r.clone());
+                        let status = if r.open { "open" } else { "closed" };
+                        let mut line = format!("{}:{} {}", r.target, r.port, status);
+                        if let Some(proto) = r.protocol {
+                            line.push_str(&format!(" [{}]", proto));
+                        }
+                        if let Some(banner) = r.banner {
+                            if cli.raw_banner {
+                                let safe = escape_nonprintable(&banner);
+                                line.push_str(&format!(" — {}", safe));
+                            }
+                        }
+                        println!("{}", line);
+                    }
+                }
+            }
+            Err(e) => eprintln!("scan task error: {}", e),
+        }
     }
 
     if cli.json {
-        let out = ScanOutput { results: all_results };
-        println!("{}", serde_json::to_string_pretty(&out)?);
-    } else {
-        // Sort output by target then port for stability
-        all_results.sort_by(|a, b| a.target.cmp(&b.target).then(a.port.cmp(&b.port)));
-        for r in all_results {
-            let status = if r.open { "open" } else { "closed" };
-            let mut line = format!("{}:{} {}", r.target, r.port, status);
-            if let Some(proto) = r.protocol {
-                line.push_str(&format!(" [{}]", proto));
-            }
-            if let Some(banner) = r.banner {
-                if cli.raw_banner {
-                    line.push_str(&format!(" — {}", banner));
-                }
-            }
-            println!("{}", line);
-        }
+        println!("]}}");
+    }
+
+    // Ensure temp file is flushed
+    tmp_writer.flush().ok();
+
+    // Write the final consolidated ScanOutput artifact
+    let artifact = ScanOutput { results: all_results };
+    let mut out = BufWriter::new(File::create(&cli.save_file)?);
+    serde_json::to_writer(&mut out, &artifact)?;
+    out.flush().ok();
+
+    // Close and remove the temporary file
+    drop(tmp_writer); // Ensure the file handle is closed before attempting removal (important on Windows)
+    if let Err(e) = std::fs::remove_file("output.tmp") {
+        eprintln!("warning: failed to remove temp file output.tmp: {}", e);
     }
 
     Ok(())
