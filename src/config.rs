@@ -48,7 +48,7 @@ pub fn load_config(path: Option<&Path>) -> io::Result<Option<FileConfig>> {
 }
 
 pub fn save_config(cfg: &FileConfig, path: Option<&Path>) -> io::Result<PathBuf> {
-    let mut path = match path {
+    let path = match path {
         Some(p) => p.to_path_buf(),
         None => default_config_path().ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no default config dir"))?,
     };
